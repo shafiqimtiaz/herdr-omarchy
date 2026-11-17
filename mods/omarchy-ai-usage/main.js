@@ -45,6 +45,12 @@ const uniqueSources = list => {
 const due = src => src.provider && Date.now() - (Date.parse(shared(keyOf(src.id))?.checked ?? "") || 0) >= EVERY;
 const refreshAll = (force) => Promise.all(shownList().filter(s => force || due(s)).map(refreshOne));
 const isStale = u => !u?.fetched || Boolean(u.error) || Date.now() - Date.parse(u.fetched) > STALE;
+// A window past its reset time starts over at 0%, even when the last fetch is old (Kimi's
+// 15-minute login lapses while Kimi is idle). Its next reset is unknown until the next fetch.
+const current = u => (u?.windows ?? []).map(w => {
+  const end = Date.parse(w.resets_at ?? "");
+  return Number.isFinite(end) && end <= Date.now() ? { ...w, used: 0, resets_at: null } : w;
+});
 
 // Agent terminals the person sees now, the focused one first. A zoomed pane hides the rest.
 function visible() {
@@ -199,7 +205,7 @@ export default class AiUsage extends View {
     const rows = shownList().map(s => {
       const u = shared(keyOf(s.id));
       const stale = idle || isStale(u);
-      const ws = (u?.windows ?? []).slice(0, 2);
+      const ws = current(u).slice(0, 2);
       return h_flex().h(19).gap(6).items_center().flex_none()
         .child(this.icon(s, 13, stale))
         .child(div().w(64).flex_none().whitespace_nowrap().font_semibold().text_color(stale ? t.dim : t.foreground).child(s.label))
@@ -223,7 +229,7 @@ export default class AiUsage extends View {
     const segs = list.map(s => {
       const u = shared(keyOf(s.id));
       const stale = idle || isStale(u);
-      const [first, second] = u?.windows ?? [];
+      const [first, second] = current(u);
       const win = (w) => {
         const c = color(w, stale, t, s);
         return h_flex().gap(5).items_center().flex_none()
@@ -261,7 +267,7 @@ export default class AiUsage extends View {
           .child(this.icon(s, 14, stale))
           .child(div().flex_none().text_size(12.5).font_bold().text_color(t.foreground).child(title(s)))
           .when(Boolean(s.sub), el => el.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(s.sub))))
-        .children((u?.windows ?? []).map(w => v_flex().gap(6)
+        .children(current(u).map(w => v_flex().gap(6)
           .child(h_flex().justify_between().items_end()
             .child(div().text_color(t.foreground).child(w.long))
             .child(div().text_size(18).font_semibold().text_color(color(w, stale, t, s)).child(`${w.used}%`)))

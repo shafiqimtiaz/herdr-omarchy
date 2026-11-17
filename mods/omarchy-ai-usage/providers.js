@@ -47,6 +47,27 @@ export const PROVIDERS = {
     },
   },
   openai: { name: "ChatGPT", color: "#7A9DFF" },
+  // Kimi Code's managed plan: the same GET Kimi's own /usage panel makes. used_ratio is 0..1.
+  kimi: {
+    name: "Kimi",
+    color: "#2FD36B",
+    async usage(c) {
+      const res = await fetch(`${c.base}/usages`, {
+        headers: { Authorization: `Bearer ${c.token}`, Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const u = (await res.json())?.usages ?? {};
+      const ratio = e => (e && Number.isFinite(Number(e.used_ratio)) ? Number(e.used_ratio) : null);
+      const out = [];
+      for (const [k, span] of [["limit_5h", 5 * H], ["limit_7d", 7 * DAY]]) {
+        const r = ratio(u[k]);
+        if (r !== null) out.push(win(span, r * 100, u[k].reset_time || null));
+      }
+      const m = ratio(u.limit_month_total);
+      if (m !== null) out.push(win(30 * DAY, m * 100, u.limit_month_total.reset_time || null, { short: "mo", long: "Monthly limit", monthly: true }));
+      return out;
+    },
+  },
   copilot: {
     name: "Copilot",
     color: "#a371f7",
@@ -83,6 +104,14 @@ async function creds(src) {
     const t = (await json(".codex/auth.json"))?.tokens;
     if (!t?.access_token) throw new Error("no Codex ChatGPT login in ~/.codex");
     return { token: t.access_token, account: t.account_id };
+  }
+  if (f.kimi) {
+    // Read only: Kimi refreshes this 15-minute token itself, under its own lock, while it runs.
+    const t = await json(".kimi-code/credentials/kimi-code.json");
+    if (!t?.access_token) throw new Error("no Kimi Code login in ~/.kimi-code");
+    const config = await readTextFile(`${home()}/.kimi-code/config.toml`).catch(() => null);
+    const base = /https:\/\/api\.kimi\.ai\/coding\/v1/.test(config ?? "") ? "https://api.kimi.ai/coding/v1" : "https://api.kimi.com/coding/v1";
+    return { token: t.access_token, base, expires: Number(t.expires_at) * 1000 || undefined };
   }
   if (f.copilot) {
     const gh = (await json(".config/github-copilot/oauth.json"))?.["https://github.com/login/oauth"]?.[0]?.accessToken;
@@ -157,6 +186,7 @@ export async function sourcesFor(v, claudeDirOf, usageSource, isCurrent = () => 
     return Promise.all(dirs.map(async d => ({ id: `claude.${claudeLabel(d)}`, provider: "claude", agent, label: await claudeName(d), sub: d.replace(home(), "~"), icon, tint, from: { claude: d } })));
   }
   if (key === "codex") return [{ id: "codex", provider: "codex", agent, label: "codex", sub: "ChatGPT plan", icon, tint, from: { codex: true } }];
+  if (/^kimi/.test(key)) return [{ id: "kimi", provider: "kimi", agent, label: "Kimi", sub: "Kimi Code plan", icon, tint, from: { kimi: true } }];
   if (key === "copilot") return [{ id: "copilot", provider: "copilot", agent, label: "copilot", sub: "GitHub Copilot", icon, tint, from: { copilot: true } }];
   const h = HARNESS[key];
   if (!h) return [labelled(v)];

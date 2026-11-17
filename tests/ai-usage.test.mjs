@@ -37,9 +37,9 @@ function usageHarness(files = {}, response = {}, status = 200, settings = {}, pr
   Object.assign(dependencies, providers);
   const source = readFileSync(new URL('../mods/omarchy-ai-usage/main.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/gm, '').replace('export default class', 'class');
-  const { refreshOne, refreshAll, AiUsage } = Function(...Object.keys(dependencies), `${source}\nreturn { refreshOne, refreshAll, AiUsage };`)(...Object.values(dependencies));
+  const { refreshOne, refreshAll, AiUsage, current } = Function(...Object.keys(dependencies), `${source}\nreturn { refreshOne, refreshAll, AiUsage, current };`)(...Object.values(dependencies));
   return {
-    state, requests, reads, refreshOne, refreshAll, fetchUsage: providers.fetchUsage, AiUsage,
+    state, requests, reads, refreshOne, refreshAll, fetchUsage: providers.fetchUsage, AiUsage, current,
     route: (value, directory = null, usageSource) => providers.sourcesFor(value, async () => directory, usageSource),
     setProps: value => { currentProps = value; },
   };
@@ -83,6 +83,61 @@ test('Codex sends account ID and normalizes timestamps', async () => {
   ]);
   assert.equal(h.requests[0].url, 'https://chatgpt.com/backend-api/wham/usage');
   assert.equal(h.requests[0].headers['ChatGPT-Account-Id'], 'account');
+});
+
+const kimi = { id: 'kimi', provider: 'kimi', agent: 'Kimi', from: { kimi: true } };
+const kimiLogin = (extra = {}) => ({ '/home/test/.kimi-code/credentials/kimi-code.json': { access_token: 'kimi-token', expires_at: Math.floor(Date.now() / 1000) + 600, ...extra } });
+
+test('Kimi normalizes 5h, weekly and monthly quotas from used ratios', async () => {
+  const h = usageHarness(kimiLogin(), { usages: {
+    limit_5h: { used_ratio: 0.034, reset_time: '2026-11-17T19:33:11Z' },
+    limit_7d: { used_ratio: '0.22', reset_time: '2026-11-24T07:33:12Z' },
+    limit_month_total: { used_ratio: 0.5, reset_time: '2026-12-01T00:00:00Z' },
+    limit_month_code: { used_ratio: 0.1 },
+  } });
+  await h.refreshOne(kimi);
+  assert.deepEqual(h.state.get('omarchy-ai-usage.kimi').windows, [
+    { short: '5h', long: '5-hour limit', span: 5 * 3600e3, used: 3, resets_at: '2026-11-17T19:33:11Z' },
+    { short: '7d', long: 'Weekly limit', span: 7 * 24 * 3600e3, used: 22, resets_at: '2026-11-24T07:33:12Z' },
+    { short: 'mo', long: 'Monthly limit', span: 30 * 24 * 3600e3, used: 50, resets_at: '2026-12-01T00:00:00Z', monthly: true },
+  ]);
+  assert.equal(h.requests[0].url, 'https://api.kimi.com/coding/v1/usages');
+  assert.equal(h.requests[0].headers.Authorization, 'Bearer kimi-token');
+  assert.ok(!JSON.stringify([...h.state]).includes('kimi-token'));
+});
+
+test('Kimi uses the global host when its config points there', async () => {
+  const h = usageHarness({ ...kimiLogin(), '/home/test/.kimi-code/config.toml': 'base_url = "https://api.kimi.ai/coding/v1"\n' }, { usages: {} });
+  await h.refreshOne(kimi);
+  assert.equal(h.requests[0].url, 'https://api.kimi.ai/coding/v1/usages');
+});
+
+test('Kimi reports an expired token without calling the endpoint', async () => {
+  const h = usageHarness(kimiLogin({ expires_at: Math.floor(Date.now() / 1000) - 60 }), { usages: {} });
+  await h.refreshOne(kimi);
+  assert.equal(h.requests.length, 0);
+  assert.match(h.state.get('omarchy-ai-usage.kimi').error, /token expired/);
+});
+
+test('Kimi terminals route to the Kimi plan', async () => {
+  const h = usageHarness();
+  for (const key of ['kimi', 'kimi-code']) {
+    const [src] = await h.route(agent(key));
+    assert.equal(src.id, 'kimi');
+    assert.equal(src.provider, 'kimi');
+    assert.deepEqual(src.from, { kimi: true });
+  }
+});
+
+test('a window past its reset shows 0% until the next fetch', () => {
+  const h = usageHarness();
+  const past = new Date(Date.now() - 60e3).toISOString(), future = new Date(Date.now() + 3600e3).toISOString();
+  assert.deepEqual(h.current({ windows: [
+    { short: '5h', used: 40, resets_at: past },
+    { short: '7d', used: 22, resets_at: future },
+    { short: 'mo', used: 9, resets_at: null },
+  ] }).map(w => [w.short, w.used, w.resets_at]), [['5h', 0, null], ['7d', 22, future], ['mo', 9, null]]);
+  assert.deepEqual(h.current(undefined), []);
 });
 
 test('Copilot excludes unlimited and unknown quotas', async () => {

@@ -72,6 +72,14 @@ function visible() {
   return list.sort((a, b) => b.focused - a.focused);
 }
 
+// Prints the CLAUDE_CONFIG_DIR= lines of terminal $1's processes; fails when it has none.
+const CLAUDE_DIR_OF = `if [ -d /proc/self ]; then
+  found=; for f in $(grep -lzx "HC_TERMINAL_ID=$1" /proc/[0-9]*/environ 2>/dev/null); do found=1; grep -zs '^CLAUDE_CONFIG_DIR=' "$f" | tr '\\0' '\\n'; done; [ -n "$found" ]
+else
+  lines=$(ps -E -ww -A -o command= 2>/dev/null | grep -E " HC_TERMINAL_ID=$1( |\\$)") || exit 1
+  printf '%s\\n' "$lines" | tr ' ' '\\n' | grep '^CLAUDE_CONFIG_DIR=' || true
+fi`;
+
 export default class AiUsage extends View {
   init(_props, cx) {
     if (props()?.overlay) return;
@@ -98,9 +106,11 @@ export default class AiUsage extends View {
   }
 
   // CLAUDE_CONFIG_DIR is per process; Linux /proc ties it to the Herdr terminal (HC_TERMINAL_ID).
+  // Without /proc (macOS), `ps -E` lists each process's environment after its command line
+  // (space-separated, so a config folder with a space in its path isn't found there).
   // Looked up afresh each time: the same tab can start `ccw`, quit, then start `ccp`.
   async claudeDirOf(terminal) {
-    const r = await exec("sh", ["-c", `found=; for f in $(grep -lzx "HC_TERMINAL_ID=$1" /proc/[0-9]*/environ 2>/dev/null); do found=1; grep -zs '^CLAUDE_CONFIG_DIR=' "$f" | tr '\\0' '\\n'; done; [ -n "$found" ]`, "_", terminal]).catch(() => null);
+    const r = await exec("sh", ["-c", CLAUDE_DIR_OF, "_", terminal]).catch(() => null);
     if (r?.code !== 0) return null;
     const dir = (r.stdout ?? "").split("\n").find(l => l.startsWith("CLAUDE_CONFIG_DIR="))?.slice(18);
     return dir || `${home()}/.claude`;

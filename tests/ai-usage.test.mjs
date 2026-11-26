@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { H, DAY } from '../mods/omarchy-ai-usage/time.js';
 
@@ -709,4 +711,46 @@ test('quota meters open details on click without a hover tooltip', () => {
   assert.equal(usage.anchor, bounds);
   assert.equal(stopped, true);
   assert.equal(opened, 1);
+});
+
+test('Claude falls back to the macOS Keychain login when .credentials.json is missing', async () => {
+  const calls = [];
+  const live = {
+    exec: async (cmd, args) => {
+      calls.push(args?.[1] ?? cmd);
+      return args?.[1]?.includes('security find-generic-password')
+        ? { code: 0, stdout: JSON.stringify({ claudeAiOauth: { accessToken: 'keychain-token' } }), stderr: '' }
+        : { code: 1, stdout: '', stderr: '' };
+    },
+  };
+  const h = usageHarness({}, { five_hour: { utilization: 10, resets_at: '2026-11-05T01:00:00Z' } }, 200, {}, {}, live);
+  await h.refreshOne(claude);
+  assert.equal(h.requests[0].headers.Authorization, 'Bearer keychain-token');
+  assert.equal(h.state.get('omarchy-ai-usage.claude.claude').error, null);
+
+  // A credentials file still wins, without asking the Keychain.
+  const file = usageHarness(claudeLogin, { five_hour: { utilization: 10 } }, 200, {}, {}, live);
+  calls.length = 0;
+  await file.refreshOne(claude);
+  assert.equal(file.requests[0].headers.Authorization, 'Bearer claude-token');
+  assert.equal(calls.length, 0);
+});
+
+test('without /proc, a terminal\'s Claude profile comes from ps -E', { skip: existsSync('/proc/self') && 'this system has /proc' }, async () => {
+  const bin = mkdtempSync(`${tmpdir()}/ps-`);
+  writeFileSync(`${bin}/ps`, `#!/bin/sh
+echo "-zsh HC_TERMINAL_ID=t1 HOME=/home/test"
+echo "claude --resume HC_TERMINAL_ID=t2 CLAUDE_CONFIG_DIR=/home/test/.claude-personal"
+echo "claude HC_TERMINAL_ID=t22 CLAUDE_CONFIG_DIR=/home/test/.claude-wrong"
+`);
+  chmodSync(`${bin}/ps`, 0o755);
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  const live = {
+    exec: (cmd, args) => new Promise(resolve => execFile(cmd, args, { env }, (error, stdout, stderr) =>
+      resolve({ code: error ? (error.code ?? 1) : 0, stdout, stderr }))),
+  };
+  const instance = new (usageHarness({}, {}, 200, {}, {}, live).AiUsage)();
+  assert.equal(await instance.claudeDirOf('t1'), '/home/test/.claude');
+  assert.equal(await instance.claudeDirOf('t2'), '/home/test/.claude-personal');
+  assert.equal(await instance.claudeDirOf('t3'), null);
 });

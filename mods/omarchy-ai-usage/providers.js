@@ -1,4 +1,4 @@
-import { appHome, home, readTextFile } from "herdr";
+import { appHome, exec, home, readTextFile } from "herdr";
 import { H, DAY } from "./time.js";
 
 const json = async path => {
@@ -71,11 +71,21 @@ const HARNESS = {
 };
 const UNDER = { anthropic: "claude", "openai-codex": "codex", openai: "codex", "github-copilot": "copilot" };
 
+// On macOS, Claude Code keeps its login in the Keychain instead of .credentials.json. A config
+// folder other than ~/.claude adds "-<first 8 hex of sha256(folder)>" to the service name.
+// Read through `security` at fetch time and never stored.
+async function keychainClaude(dir) {
+  const script = '[ "$(uname)" = Darwin ] || exit 1; s="Claude Code-credentials"; [ "$1" = "$HOME/.claude" ] || s="$s-$(printf %s "$1" | shasum -a 256 | cut -c1-8)"; security find-generic-password -s "$s" -w';
+  const r = await exec("sh", ["-c", script, "_", dir]).catch(() => null);
+  if (r?.code !== 0) return null;
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+
 // Rebuilt from the plain source record each fetch, so the popup copy can refresh too.
 async function creds(src) {
   const f = src.from;
   if (f.claude) {
-    const o = (await json(`${f.claude}/.credentials.json`))?.claudeAiOauth;
+    const o = ((await json(`${f.claude}/.credentials.json`)) ?? (await keychainClaude(f.claude)))?.claudeAiOauth;
     if (!o?.accessToken) throw new Error(`no Claude Code login in ${f.claude.replace(home(), "~")}`);
     return { token: o.accessToken, expires: o.expiresAt };
   }
